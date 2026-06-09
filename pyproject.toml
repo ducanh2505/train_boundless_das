@@ -1,0 +1,10 @@
+[project]
+name = "train-boudless-das"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pyvene>=0.1.8",
+    "torch>=2.12.0",
+]
