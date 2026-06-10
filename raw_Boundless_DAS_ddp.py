@@ -2,6 +2,9 @@
 # coding: utf-8
 
 import os
+import math
+from contextlib import nullcontext
+
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -33,11 +36,13 @@ dist.init_process_group("nccl")
 local_rank = int(os.environ["LOCAL_RANK"])
 torch.cuda.set_device(local_rank)
 device = torch.device(f"cuda:{local_rank}")
+rank = dist.get_rank()
+world_size = dist.get_world_size()
 
 config, tokenizer, llama = create_llama()
 llama.to(device)
 
-print(f"Running on rank {dist.get_rank()} / local GPU {local_rank}")
+print(f"Running on rank {rank} / {world_size} on local GPU {local_rank}")
 
 raw_prealign = factual_sampler(tokenizer, 5000, game="pricing_tag")
 prealign_dataset = Dataset.from_dict(
@@ -79,9 +84,17 @@ train_dataset = Dataset.from_dict(
         "intervention_ids": raw_train[3],  # we will not use this field
     }
 ).with_format("torch")
+train_sampler = DistributedSampler(
+    train_dataset,
+    num_replicas=world_size,
+    rank=rank,
+    shuffle=True,
+)
 train_dataloader = DataLoader(
     train_dataset,
     batch_size=16,
+    sampler=train_sampler,
+    pin_memory=True,
 )
 eval_dataset = Dataset.from_dict(
     {
@@ -94,6 +107,7 @@ eval_dataset = Dataset.from_dict(
 eval_dataloader = DataLoader(
     eval_dataset,
     batch_size=8,
+    pin_memory=True,
 )
 test_dataset = Dataset.from_dict(
     {
@@ -106,6 +120,7 @@ test_dataset = Dataset.from_dict(
 test_dataloader = DataLoader(
     test_dataset,
     batch_size=8,
+    pin_memory=True,
 )
 
 
@@ -137,8 +152,10 @@ intervenable = DDP(
 )
 
 
-t_total = int(len(train_dataloader) * 3)
-warm_up_steps = 0.1 * t_total
+epochs = 3
+gradient_accumulation_steps = 4
+t_total = math.ceil(len(train_dataloader) / gradient_accumulation_steps) * epochs
+warm_up_steps = int(0.1 * t_total)
 optimizer_params = []
 for k, v in intervenable.module.interventions.items():
     optimizer_params += [{"params": v.rotate_layer.parameters()}]
@@ -163,15 +180,13 @@ def compute_metrics(eval_preds, eval_labels):
     return {"accuracy": accuracy}
 
 
-epochs = 3
-gradient_accumulation_steps = 4
 total_step = 0
 target_total_step = len(train_dataloader) * epochs
 temperature_start = 50.0
 temperature_end = 0.1
 temperature_schedule = (
     torch.linspace(temperature_start, temperature_end, target_total_step)
-    .to(torch.bfloat16)
+    .to(torch.float16)
     .to(device)
 )
 intervenable.module.set_temperature(temperature_schedule[total_step])
@@ -182,65 +197,77 @@ def calculate_loss(logits, labels):
     shift_labels = labels[..., :].contiguous()
     # Flatten the tokens
     loss_fct = CrossEntropyLoss()
-    shift_logits = shift_logits.view(-1, intervenable.model_config.vocab_size)
+    shift_logits = shift_logits.view(-1, intervenable.module.model_config.vocab_size)
     shift_labels = shift_labels.view(-1)
     # Enable model parallelism
     shift_labels = shift_labels.to(shift_logits.device)
     loss = loss_fct(shift_logits, shift_labels)
 
-    for k, v in intervenable.module.interventions.items():
-        boundary_loss = 1.0 * v.intervention_boundaries.sum()
+    boundary_loss = 0.0
+    for _, v in intervenable.module.interventions.items():
+        boundary_loss = boundary_loss + v.intervention_boundaries.sum()
     loss += boundary_loss
 
     return loss
 
 
 intervenable.module.model.train()  # train enables drop-off but no grads
-if dist.get_rank() == 0:
-    print("llama trainable parameters: ", count_parameters(intervenable.module.model if hasattr(intervenable,"module") else intervenable.model))
-if dist.get_rank() == 0:
-    print("intervention trainable parameters: ", (intervenable.module if hasattr(intervenable,"module") else intervenable).count_parameters())
-train_iterator = trange(0, int(epochs), desc="Epoch")
+if rank == 0:
+    print("llama trainable parameters: ", count_parameters(intervenable.module.model))
+    print("intervention trainable parameters: ", intervenable.module.count_parameters())
+train_iterator = trange(0, int(epochs), desc="Epoch", disable=rank != 0)
 for epoch in train_iterator:
+    train_sampler.set_epoch(epoch)
     epoch_iterator = tqdm(
-        train_dataloader, desc=f"Epoch: {epoch}", position=0, leave=True
+        train_dataloader,
+        desc=f"Epoch: {epoch}",
+        position=0,
+        leave=True,
+        disable=rank != 0,
     )
     for step, inputs in enumerate(epoch_iterator):
         for k, v in inputs.items():
             if v is not None and isinstance(v, torch.Tensor):
-                inputs[k] = v.to("cuda")
-        b_s = inputs["input_ids"].shape[0]
-        _, counterfactual_outputs = intervenable(
-            {"input_ids": inputs["input_ids"]},
-            [{"input_ids": inputs["source_input_ids"]}],
-            {"sources->base": 80},  # swap 80th token
-        )
-        eval_metrics = compute_metrics(
-            [counterfactual_outputs.logits], [inputs["labels"]]
-        )
+                inputs[k] = v.to(device, non_blocking=True)
 
-        # loss and backprop
-        loss = calculate_loss(counterfactual_outputs.logits, inputs["labels"])
-        loss_str = round(loss.item(), 2)
-        epoch_iterator.set_postfix({"loss": loss_str, "acc": eval_metrics["accuracy"]})
+        is_last_batch = step == len(train_dataloader) - 1
+        should_step = (total_step + 1) % gradient_accumulation_steps == 0 or is_last_batch
+        sync_context = nullcontext() if should_step else intervenable.no_sync()
+        with sync_context:
+            _, counterfactual_outputs = intervenable(
+                {"input_ids": inputs["input_ids"]},
+                [{"input_ids": inputs["source_input_ids"]}],
+                {"sources->base": 80},  # swap 80th token
+            )
+            eval_metrics = compute_metrics(
+                [counterfactual_outputs.logits], [inputs["labels"]]
+            )
 
-        if gradient_accumulation_steps > 1:
-            loss = loss / gradient_accumulation_steps
-        loss.backward()
-        if total_step % gradient_accumulation_steps == 0:
-            if not (gradient_accumulation_steps > 1 and total_step == 0):
-                optimizer.step()
-                scheduler.step()
-                intervenable.module.set_zero_grad()
-                intervenable.module.set_temperature(temperature_schedule[total_step])
+            # loss and backprop
+            loss = calculate_loss(counterfactual_outputs.logits, inputs["labels"])
+            loss_str = round(loss.item(), 2)
+            epoch_iterator.set_postfix({"loss": loss_str, "acc": eval_metrics["accuracy"]})
+
+            if gradient_accumulation_steps > 1:
+                loss = loss / gradient_accumulation_steps
+            loss.backward()
+
+        if should_step:
+            optimizer.step()
+            scheduler.step()
+            intervenable.module.set_zero_grad()
+            intervenable.module.set_temperature(temperature_schedule[total_step])
         total_step += 1
 
 
 eval_labels = []
 eval_preds = []
+dist.barrier()
 with torch.no_grad():
-    epoch_iterator = tqdm(test_dataloader, desc="Test")
+    epoch_iterator = tqdm(test_dataloader, desc="Test", disable=rank != 0)
     for step, inputs in enumerate(epoch_iterator):
+        if rank != 0:
+            break
         for k, v in inputs.items():
             if v is not None and isinstance(v, torch.Tensor):
                 inputs[k] = v.to(device, non_blocking=True)
@@ -252,5 +279,9 @@ with torch.no_grad():
         )
         eval_labels += [inputs["labels"]]
         eval_preds += [counterfactual_outputs.logits]
-eval_metrics = compute_metrics(eval_preds, eval_labels)
-print(eval_metrics)
+if rank == 0:
+    eval_metrics = compute_metrics(eval_preds, eval_labels)
+    print(eval_metrics)
+
+dist.barrier()
+dist.destroy_process_group()
