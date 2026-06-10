@@ -3,6 +3,7 @@
 
 import os
 import math
+import argparse
 from contextlib import nullcontext
 
 import torch
@@ -30,6 +31,16 @@ from pyvene import create_llama
 from pyvene import set_seed, count_parameters
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train-batch-size", type=int, default=16)
+    parser.add_argument("--eval-batch-size", type=int, default=8)
+    parser.add_argument("--test-batch-size", type=int, default=8)
+    parser.add_argument("--prealign-batch-size", type=int, default=8)
+    return parser.parse_args()
+
+
+args = parse_args()
 
 dist.init_process_group("nccl")
 
@@ -49,7 +60,10 @@ prealign_dataset = Dataset.from_dict(
     {"input_ids": raw_prealign[0], "labels": raw_prealign[1]}
 )
 prealign_dataset.set_format("torch", columns=["input_ids", "labels"])
-prealign_dataloader = DataLoader(prealign_dataset, batch_size=8)
+prealign_dataloader = DataLoader(
+    prealign_dataset,
+    batch_size=args.prealign_batch_size,
+)
 
 set_seed(42)
 
@@ -92,7 +106,7 @@ train_sampler = DistributedSampler(
 )
 train_dataloader = DataLoader(
     train_dataset,
-    batch_size=16,
+    batch_size=args.train_batch_size,
     sampler=train_sampler,
     pin_memory=True,
 )
@@ -106,7 +120,7 @@ eval_dataset = Dataset.from_dict(
 ).with_format("torch")
 eval_dataloader = DataLoader(
     eval_dataset,
-    batch_size=8,
+    batch_size=args.eval_batch_size,
     pin_memory=True,
 )
 test_dataset = Dataset.from_dict(
@@ -119,7 +133,7 @@ test_dataset = Dataset.from_dict(
 ).with_format("torch")
 test_dataloader = DataLoader(
     test_dataset,
-    batch_size=8,
+    batch_size=args.test_batch_size,
     pin_memory=True,
 )
 
