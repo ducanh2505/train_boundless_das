@@ -42,6 +42,17 @@ get_accelerator().set_device(_local_rank)
 
 DATA_DIR = "data"
 BATCH_SIZE = 16
+if torch.distributed.get_rank() == 0:
+    config = LlamaConfig.from_pretrained("sharpbai/alpaca-7b-merged")
+    llama = LlamaForCausalLM.from_pretrained(
+        "sharpbai/alpaca-7b-merged",
+        torch_dtype=torch.bfloat16, 
+    )
+    tokenizer = LlamaTokenizer.from_pretrained("sharpbai/alpaca-7b-merged")
+    llama.eval() 
+
+
+torch.distributed.barrier()
 config = LlamaConfig.from_pretrained("sharpbai/alpaca-7b-merged")
 llama = LlamaForCausalLM.from_pretrained(
     "sharpbai/alpaca-7b-merged",
@@ -121,7 +132,7 @@ temperature_end = 0.1
 temperature_schedule = (
     torch.linspace(temperature_start, temperature_end, target_total_step)
     .to(torch.bfloat16)
-    .to("mps")
+    .to(local_device)
 )
 engine.module.set_temperature(temperature_schedule[total_step])
 
