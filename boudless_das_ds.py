@@ -42,17 +42,7 @@ get_accelerator().set_device(_local_rank)
 
 DATA_DIR = "data"
 BATCH_SIZE = 16
-if torch.distributed.get_rank() == 0:
-    config = LlamaConfig.from_pretrained("sharpbai/alpaca-7b-merged")
-    llama = LlamaForCausalLM.from_pretrained(
-        "sharpbai/alpaca-7b-merged",
-        torch_dtype=torch.bfloat16, 
-    )
-    tokenizer = LlamaTokenizer.from_pretrained("sharpbai/alpaca-7b-merged")
-    llama.eval() 
 
-
-torch.distributed.barrier()
 config = LlamaConfig.from_pretrained("sharpbai/alpaca-7b-merged")
 llama = LlamaForCausalLM.from_pretrained(
     "sharpbai/alpaca-7b-merged",
