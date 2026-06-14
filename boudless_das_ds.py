@@ -163,9 +163,6 @@ def compute_metrics(eval_preds, eval_labels):
 
 
 
-intervenable.model.train()  # train enables drop-off but no grads
-print("llama trainable parameters: ", count_parameters(intervenable.model))
-print("intervention trainable parameters: ", intervenable.count_parameters())
 train_iterator = trange(0, int(epochs), desc="Epoch")
 for epoch in train_iterator:
     epoch_iterator = tqdm(
@@ -176,7 +173,7 @@ for epoch in train_iterator:
             if v is not None and isinstance(v, torch.Tensor):
                 inputs[k] = v.to(local_device)
         b_s = inputs["input_ids"].shape[0]
-        _, counterfactual_outputs = intervenable(
+        _, counterfactual_outputs = engine(
             {"input_ids": inputs["input_ids"]},
             [{"input_ids": inputs["source_input_ids"]}],
             {"sources->base": 80},  # swap 80th token
