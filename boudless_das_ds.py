@@ -91,7 +91,7 @@ engine, optimizer, trainloader, _ = deepspeed.initialize(
     config="ds_config.json",
 
 )
-
+print("stage: ", engine.zero_optimization_stage())
 local_rank = engine.local_rank
 local_device = get_accelerator().device_name(local_rank)
 target_dtype = None
