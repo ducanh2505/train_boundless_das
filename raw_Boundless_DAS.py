@@ -21,6 +21,7 @@ __version__ = "10/05/2023"
 
 import torch
 from tqdm import tqdm, trange
+import time
 from datasets import Dataset
 from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
@@ -187,7 +188,8 @@ config = simple_boundless_das_position_config(
 intervenable = IntervenableModel(config, llama)
 intervenable.set_device(device)
 intervenable.disable_model_gradients()
-
+print("after move to device")
+time.sleep(60)
 
 # In[8]:
 
