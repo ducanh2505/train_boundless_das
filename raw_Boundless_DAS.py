@@ -42,10 +42,10 @@ from pyvene import set_seed, count_parameters
 
 
 # In[3]:
-
+device = "cuda:0"
 config, tokenizer, llama = create_llama()
 print("move model to mps device")
-_ = llama.to("mps")  # single gpu
+_ = llama.to(device)  # single gpu
 
 print("Change to eval mode")
 _ = llama.eval()  # always no grad on the model
@@ -185,7 +185,7 @@ config = simple_boundless_das_position_config(
     type(llama), "block_output", 15
 )
 intervenable = IntervenableModel(config, llama)
-intervenable.set_device("mps")
+intervenable.set_device(device)
 intervenable.disable_model_gradients()
 
 
@@ -227,7 +227,7 @@ temperature_end = 0.1
 temperature_schedule = (
     torch.linspace(temperature_start, temperature_end, target_total_step)
     .to(torch.bfloat16)
-    .to("mps")
+    .to(device)
 )
 intervenable.set_temperature(temperature_schedule[total_step])
 
@@ -264,7 +264,7 @@ for epoch in train_iterator:
     for step, inputs in enumerate(epoch_iterator):
         for k, v in inputs.items():
             if v is not None and isinstance(v, torch.Tensor):
-                inputs[k] = v.to("mps")
+                inputs[k] = v.to(device)
         b_s = inputs["input_ids"].shape[0]
         _, counterfactual_outputs = intervenable(
             {"input_ids": inputs["input_ids"]},
