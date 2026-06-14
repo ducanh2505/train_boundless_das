@@ -1,4 +1,5 @@
 import torch
+import time
 import deepspeed
 import os
 from deepspeed.accelerator import get_accelerator
@@ -169,10 +170,14 @@ for epoch in train_iterator:
         train_dataloader, desc=f"Epoch: {epoch}", position=0, leave=True, disable=local_rank!=0
     )
     for step, inputs in enumerate(epoch_iterator):
+        print("sleep before move inputs to device")
+        time.sleep(60)
         for k, v in inputs.items():
             if v is not None and isinstance(v, torch.Tensor):
                 inputs[k] = v.to(local_device)
         b_s = inputs["input_ids"].shape[0]
+        print("sleep after move inputs to device")
+        time.sleep(60)
         _, counterfactual_outputs = engine(
             {"input_ids": inputs["input_ids"]},
             [{"input_ids": inputs["source_input_ids"]}],
