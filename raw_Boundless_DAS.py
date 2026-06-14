@@ -43,7 +43,6 @@ from pyvene import set_seed, count_parameters
 
 # In[3]:
 
-
 config, tokenizer, llama = create_llama()
 print("move model to mps device")
 _ = llama.to("mps")  # single gpu

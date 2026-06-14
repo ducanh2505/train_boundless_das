@@ -13,7 +13,13 @@ from tqdm import tqdm, trange
 from datasets import Dataset
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from transformers import get_linear_schedule_with_warmup
+from transformers import (
+    BitsAndBytesConfig,
+    LlamaConfig,
+    LlamaForCausalLM,
+    LlamaTokenizer,
+    get_linear_schedule_with_warmup,
+)
 from torch.nn import CrossEntropyLoss
 from tutorial_price_tagging_utils import (
     factual_sampler,
@@ -27,17 +33,69 @@ from pyvene import (
     RepresentationConfig,
     IntervenableConfig,
 )
-from pyvene import create_llama
 from pyvene import set_seed, count_parameters
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model-name", type=str, default="sharpbai/alpaca-7b-merged")
+    parser.add_argument("--cache-dir", type=str, default=None)
+    parser.add_argument("--load-in-4bit", action="store_true")
+    parser.add_argument("--load-in-8bit", action="store_true")
+    parser.add_argument("--disable-fp16-autocast", action="store_true")
     parser.add_argument("--train-batch-size", type=int, default=16)
     parser.add_argument("--eval-batch-size", type=int, default=8)
     parser.add_argument("--test-batch-size", type=int, default=8)
     parser.add_argument("--prealign-batch-size", type=int, default=8)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    parser.add_argument("--epochs", type=int, default=3)
     return parser.parse_args()
+
+
+def create_llama(
+    name="sharpbai/alpaca-7b-merged",
+    cache_dir=None,
+    device=None,
+    load_in_4bit=False,
+    load_in_8bit=False,
+):
+    if load_in_4bit and load_in_8bit:
+        raise ValueError("Use only one of --load-in-4bit or --load-in-8bit.")
+
+    config = LlamaConfig.from_pretrained(name, cache_dir=cache_dir)
+    config.use_cache = False
+
+    tokenizer = LlamaTokenizer.from_pretrained(name, cache_dir=cache_dir)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model_kwargs = {
+        "config": config,
+        "cache_dir": cache_dir,
+        "low_cpu_mem_usage": True,
+    }
+
+    if load_in_4bit or load_in_8bit:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=load_in_4bit,
+            load_in_8bit=load_in_8bit,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        model_kwargs["quantization_config"] = quantization_config
+        model_kwargs["device_map"] = {"": device.index}
+    else:
+        model_kwargs["torch_dtype"] = torch.float16
+
+    llama = LlamaForCausalLM.from_pretrained(name, **model_kwargs)
+    if not (load_in_4bit or load_in_8bit):
+        llama.to(device)
+
+    llama.config.use_cache = False
+    llama.eval()
+    print("loaded model")
+    return config, tokenizer, llama
 
 
 args = parse_args()
@@ -49,9 +107,15 @@ torch.cuda.set_device(local_rank)
 device = torch.device(f"cuda:{local_rank}")
 rank = dist.get_rank()
 world_size = dist.get_world_size()
+use_fp16_autocast = not args.disable_fp16_autocast
 
-config, tokenizer, llama = create_llama()
-llama.to(device)
+config, tokenizer, llama = create_llama(
+    name=args.model_name,
+    cache_dir=args.cache_dir,
+    device=device,
+    load_in_4bit=args.load_in_4bit,
+    load_in_8bit=args.load_in_8bit,
+)
 
 print(f"Running on rank {rank} / {world_size} on local GPU {local_rank}")
 
@@ -166,8 +230,8 @@ intervenable = DDP(
 )
 
 
-epochs = 3
-gradient_accumulation_steps = 4
+epochs = args.epochs
+gradient_accumulation_steps = args.gradient_accumulation_steps
 t_total = math.ceil(len(train_dataloader) / gradient_accumulation_steps) * epochs
 warm_up_steps = int(0.1 * t_total)
 optimizer_params = []
@@ -248,17 +312,22 @@ for epoch in train_iterator:
         should_step = (total_step + 1) % gradient_accumulation_steps == 0 or is_last_batch
         sync_context = nullcontext() if should_step else intervenable.no_sync()
         with sync_context:
-            _, counterfactual_outputs = intervenable(
-                {"input_ids": inputs["input_ids"]},
-                [{"input_ids": inputs["source_input_ids"]}],
-                {"sources->base": 80},  # swap 80th token
-            )
-            eval_metrics = compute_metrics(
-                [counterfactual_outputs.logits], [inputs["labels"]]
-            )
+            with torch.autocast(
+                device_type="cuda",
+                dtype=torch.float16,
+                enabled=use_fp16_autocast,
+            ):
+                _, counterfactual_outputs = intervenable(
+                    {"input_ids": inputs["input_ids"]},
+                    [{"input_ids": inputs["source_input_ids"]}],
+                    {"sources->base": 80},  # swap 80th token
+                )
+                eval_metrics = compute_metrics(
+                    [counterfactual_outputs.logits], [inputs["labels"]]
+                )
 
-            # loss and backprop
-            loss = calculate_loss(counterfactual_outputs.logits, inputs["labels"])
+                # loss and backprop
+                loss = calculate_loss(counterfactual_outputs.logits, inputs["labels"])
             loss_str = round(loss.item(), 2)
             epoch_iterator.set_postfix({"loss": loss_str, "acc": eval_metrics["accuracy"]})
 
@@ -286,11 +355,16 @@ with torch.no_grad():
             if v is not None and isinstance(v, torch.Tensor):
                 inputs[k] = v.to(device, non_blocking=True)
         b_s = inputs["input_ids"].shape[0]
-        _, counterfactual_outputs = intervenable(
-            {"input_ids": inputs["input_ids"]},
-            [{"input_ids": inputs["source_input_ids"]}],
-            {"sources->base": 80},  # swap 80th token
-        )
+        with torch.autocast(
+            device_type="cuda",
+            dtype=torch.float16,
+            enabled=use_fp16_autocast,
+        ):
+            _, counterfactual_outputs = intervenable(
+                {"input_ids": inputs["input_ids"]},
+                [{"input_ids": inputs["source_input_ids"]}],
+                {"sources->base": 80},  # swap 80th token
+            )
         eval_labels += [inputs["labels"]]
         eval_preds += [counterfactual_outputs.logits]
 if rank == 0:
