@@ -128,7 +128,7 @@ print("check partitioned " )
 param_device_count = {}
 for param in engine.parameters():
     param_device_count[param.device] = param_device_count.get(param.device,0) + 1
-    
+print(param_device_count)
 local_rank = engine.local_rank
 local_device = get_accelerator().device_name(local_rank)
 target_dtype = None
@@ -164,7 +164,7 @@ temperature_schedule = (
 )
 engine.module.set_temperature(temperature_schedule[total_step])
 
-
+engine.train()
 
 train_iterator = trange(0, int(epochs), desc="Epoch")
 for epoch in train_iterator:
