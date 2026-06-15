@@ -75,15 +75,14 @@ get_accelerator().set_device(_local_rank)
 
 DATA_DIR = "data"
 BATCH_SIZE = 16
-with deepspeed.zero.Init():
-    config = LlamaConfig.from_pretrained("sharpbai/alpaca-7b-merged")
-    llama = LlamaForCausalLM.from_pretrained(
-        "sharpbai/alpaca-7b-merged",
-        torch_dtype=torch.bfloat16, 
-        config=config,
-        device_map=None
-    )
-    tokenizer = LlamaTokenizer.from_pretrained("sharpbai/alpaca-7b-merged")
+config = LlamaConfig.from_pretrained("sharpbai/alpaca-7b-merged")
+llama = LlamaForCausalLM.from_pretrained(
+    "sharpbai/alpaca-7b-merged",
+    torch_dtype=torch.bfloat16, 
+    config=config,
+    device_map=None
+)
+tokenizer = LlamaTokenizer.from_pretrained("sharpbai/alpaca-7b-merged")
 
 set_seed(42)
 
