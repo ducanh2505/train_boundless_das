@@ -127,6 +127,7 @@ print("stage: ", engine.zero_optimization_stage())
 print("check partitioned " )
 param_device_count = {}
 for param in engine.parameters():
+    print(param)
     param_device_count[param.device] = param_device_count.get(param.device,0) + 1
 print(param_device_count)
 local_rank = engine.local_rank
