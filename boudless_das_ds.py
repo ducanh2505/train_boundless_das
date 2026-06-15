@@ -4,15 +4,10 @@ import deepspeed
 import os
 from deepspeed.accelerator import get_accelerator
 from tqdm import tqdm, trange
-from datasets import Dataset, load_from_disk
+from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
 from torch.nn import CrossEntropyLoss
-from tutorial_price_tagging_utils import (
-    factual_sampler,
-    bound_alignment_sampler,
-    lower_bound_alignment_example_sampler,
-)
 
 from pyvene import (
     IntervenableModel,
@@ -22,7 +17,44 @@ from pyvene import (
 )
 from transformers import LlamaForCausalLM, LlamaTokenizer, LlamaConfig
 
-from pyvene import set_seed, count_parameters
+from pyvene import set_seed
+
+
+
+
+def calculate_loss(logits, labels, engine, vocab_size):
+    # Handle DeepSpeed wrapper
+    intervenable = engine.module
+    shift_logits = logits[..., :, :].contiguous()
+    shift_labels = labels[..., :].contiguous()
+    # Flatten the tokens
+    loss_fct = CrossEntropyLoss()
+    shift_logits = shift_logits.view(-1, vocab_size)
+    shift_labels = shift_labels.view(-1)
+    # Enable model parallelism
+    shift_labels = shift_labels.to(shift_logits.device)
+    loss = loss_fct(shift_logits, shift_labels)
+
+    for k, v in intervenable.interventions.items():
+        boundary_loss = 1.0 * v.intervention_boundaries.sum()
+    loss += boundary_loss
+
+    return loss
+
+
+# You can define your custom compute_metrics function.
+def compute_metrics(eval_preds, eval_labels):
+    total_count = 0
+    correct_count = 0
+    for eval_pred, eval_label in zip(eval_preds, eval_labels):
+        actual_test_labels = eval_label[:, -1]
+        pred_test_labels = torch.argmax(eval_pred[:, -1], dim=-1)
+        correct_labels = actual_test_labels == pred_test_labels
+        total_count += len(correct_labels)
+        correct_count += correct_labels.sum().tolist()
+    accuracy = round(correct_count / total_count, 2)
+    return {"accuracy": accuracy}
+
 
 def simple_boundless_das_position_config(model_type, intervention_type, layer):
     config = IntervenableConfig(
@@ -43,14 +75,15 @@ get_accelerator().set_device(_local_rank)
 
 DATA_DIR = "data"
 BATCH_SIZE = 16
-
-config = LlamaConfig.from_pretrained("sharpbai/alpaca-7b-merged")
-llama = LlamaForCausalLM.from_pretrained(
-    "sharpbai/alpaca-7b-merged",
-    torch_dtype=torch.bfloat16, 
-)
-tokenizer = LlamaTokenizer.from_pretrained("sharpbai/alpaca-7b-merged")
-llama.eval() 
+with deepspeed.zero.Init():
+    config = LlamaConfig.from_pretrained("sharpbai/alpaca-7b-merged")
+    llama = LlamaForCausalLM.from_pretrained(
+        "sharpbai/alpaca-7b-merged",
+        torch_dtype=torch.bfloat16, 
+        config=config,
+        device_map=None
+    )
+    tokenizer = LlamaTokenizer.from_pretrained("sharpbai/alpaca-7b-merged")
 
 set_seed(42)
 
@@ -92,6 +125,10 @@ engine, optimizer, trainloader, _ = deepspeed.initialize(
 
 )
 print("stage: ", engine.zero_optimization_stage())
+print("check partitioned " )
+param = next(engine.parameters())
+print(type(param))
+print(param.device)
 local_rank = engine.local_rank
 local_device = get_accelerator().device_name(local_rank)
 target_dtype = None
@@ -126,41 +163,6 @@ temperature_schedule = (
     .to(local_device)
 )
 engine.module.set_temperature(temperature_schedule[total_step])
-
-
-
-def calculate_loss(logits, labels, engine, vocab_size):
-    # Handle DeepSpeed wrapper
-    intervenable = engine.module
-    shift_logits = logits[..., :, :].contiguous()
-    shift_labels = labels[..., :].contiguous()
-    # Flatten the tokens
-    loss_fct = CrossEntropyLoss()
-    shift_logits = shift_logits.view(-1, vocab_size)
-    shift_labels = shift_labels.view(-1)
-    # Enable model parallelism
-    shift_labels = shift_labels.to(shift_logits.device)
-    loss = loss_fct(shift_logits, shift_labels)
-
-    for k, v in intervenable.interventions.items():
-        boundary_loss = 1.0 * v.intervention_boundaries.sum()
-    loss += boundary_loss
-
-    return loss
-
-
-# You can define your custom compute_metrics function.
-def compute_metrics(eval_preds, eval_labels):
-    total_count = 0
-    correct_count = 0
-    for eval_pred, eval_label in zip(eval_preds, eval_labels):
-        actual_test_labels = eval_label[:, -1]
-        pred_test_labels = torch.argmax(eval_pred[:, -1], dim=-1)
-        correct_labels = actual_test_labels == pred_test_labels
-        total_count += len(correct_labels)
-        correct_count += correct_labels.sum().tolist()
-    accuracy = round(correct_count / total_count, 2)
-    return {"accuracy": accuracy}
 
 
 
