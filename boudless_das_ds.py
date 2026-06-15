@@ -125,9 +125,10 @@ engine, optimizer, trainloader, _ = deepspeed.initialize(
 )
 print("stage: ", engine.zero_optimization_stage())
 print("check partitioned " )
-param = next(engine.parameters())
-print(type(param))
-print(param.device)
+param_device_count = {}
+for param in engine.parameters():
+    param_device_count[param.device] = param_device_count.get(param.device,0) + 1
+    
 local_rank = engine.local_rank
 local_device = get_accelerator().device_name(local_rank)
 target_dtype = None
