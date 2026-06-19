@@ -47,14 +47,14 @@ def create_llama(
     """Creates a LLaMA Causal LM model, config, and tokenizer from the given name and revision"""
     from transformers import LlamaForCausalLM, LlamaTokenizer, LlamaConfig
     if config is None:
-        config = LlamaConfig.from_pretrained(Path("/workspace/train_boundless_das/alpaca-7b-merged"),, cache_dir=cache_dir)
+        config = LlamaConfig.from_pretrained(Path("/workspace/train_boundless_das/alpaca-7b-merged"), cache_dir=cache_dir)
         llama = LlamaForCausalLM.from_pretrained(
             Path("/workspace/train_boundless_das/alpaca-7b-merged"),
             config=config,
             cache_dir=cache_dir,
             torch_dtype=dtype,  # save memory
         )
-        tokenizer = LlamaTokenizer.from_pretrained(Path("/workspace/train_boundless_das/alpaca-7b-merged"),, cache_dir=cache_dir)
+        tokenizer = LlamaTokenizer.from_pretrained(Path("/workspace/train_boundless_das/alpaca-7b-merged"), cache_dir=cache_dir)
     else:
         llama = LlamaForCausalLM(config)
         tokenizer = LlamaTokenizer.from_pretrained(name, cache_dir=cache_dir)
