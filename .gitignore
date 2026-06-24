@@ -77,3 +77,7 @@ docs/_build/
 
 # kaggle notebook
 kaggle_notebook.ipynb
+
+# output hydra
+data/
+outputs/
