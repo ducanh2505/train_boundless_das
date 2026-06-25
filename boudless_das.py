@@ -165,32 +165,14 @@ def main(cfg: DictConfig):
                     scheduler.step()
                     intervenable.set_zero_grad()
                     intervenable.set_temperature(temperature_schedule[total_step])
+                    print("save and push to HF")
                     intervenable.save(
-                        
+                        "./models", 
+                        save_to_hf_hub=True, 
+                        hf_repo_name="ducanh2505/pv_alpaca-7b-merged"
                     )
             total_step += 1
 
-
-
-    # evaluation on the test set
-    eval_labels = []
-    eval_preds = []
-    with torch.no_grad():
-        epoch_iterator = tqdm(test_dataloader, desc=f"Test")
-        for step, inputs in enumerate(epoch_iterator):
-            for k, v in inputs.items():
-                if v is not None and isinstance(v, torch.Tensor):
-                    inputs[k] = v.to("cuda")
-            b_s = inputs["input_ids"].shape[0]
-            _, counterfactual_outputs = intervenable(
-                {"input_ids": inputs["input_ids"]},
-                [{"input_ids": inputs["source_input_ids"]}],
-                {"sources->base": 80},  # swap 80th token
-            )
-            eval_labels += [inputs["labels"]]
-            eval_preds += [counterfactual_outputs.logits]
-    eval_metrics = compute_metrics(eval_preds, eval_labels)
-    print(eval_metrics)
 
 if __name__=="__main__":
     main()

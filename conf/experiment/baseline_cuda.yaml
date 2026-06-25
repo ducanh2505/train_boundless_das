@@ -1,5 +1,5 @@
 random_seed: 42
-device: "mps"
+device: "cuda"
 data_dir: "data"
 batch_size: 16
 epochs: 3 
