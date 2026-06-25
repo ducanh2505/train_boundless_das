@@ -165,13 +165,13 @@ def main(cfg: DictConfig):
                     scheduler.step()
                     intervenable.set_zero_grad()
                     intervenable.set_temperature(temperature_schedule[total_step])
-                    print("save and push to HF")
-                    intervenable.save(
-                        "./models", 
-                        save_to_hf_hub=True, 
-                        hf_repo_name="ducanh2505/pv_alpaca-7b-merged"
-                    )
             total_step += 1
+        print("save and push to HF")
+        intervenable.save(
+            "./models", 
+            save_to_hf_hub=True, 
+            hf_repo_name="ducanh2505/pv_alpaca-7b-merged"
+        )
 
 
 if __name__=="__main__":
