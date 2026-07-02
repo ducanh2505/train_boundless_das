@@ -1,99 +1,59 @@
+import os
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 import torch
-import time
 from tqdm import tqdm, trange
 from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
-from torch.nn import CrossEntropyLoss
 import hydra
 from omegaconf import DictConfig
-
-
-
+from utils import (
+    calculate_loss, 
+    compute_metrics,
+    simple_boundless_das_position_config
+)
 from pyvene import (
     IntervenableModel,
-    BoundlessRotatedSpaceIntervention,
-    RepresentationConfig,
-    IntervenableConfig,
 )
-from transformers import LlamaForCausalLM, LlamaTokenizer, LlamaConfig
+from transformers import LlamaForCausalLM, LlamaConfig
 
 from pyvene import set_seed, count_parameters
 
-
-def calculate_loss(logits, labels, model, vocab_size):
-    shift_logits = logits[..., :, :].contiguous()
-    shift_labels = labels[..., :].contiguous()
-    # Flatten the tokens
-    loss_fct = CrossEntropyLoss()
-    shift_logits = shift_logits.view(-1, vocab_size)
-    shift_labels = shift_labels.view(-1)
-    # Enable model parallelism
-    shift_labels = shift_labels.to(shift_logits.device)
-    loss = loss_fct(shift_logits, shift_labels)
-
-    for k, v in model.interventions.items():
-        boundary_loss = 1.0 * v.intervention_boundaries.sum()
-    loss += boundary_loss
-    return loss
-
-
-# You can define your custom compute_metrics function.
-def compute_metrics(eval_preds, eval_labels):
-    total_count = 0
-    correct_count = 0
-    for eval_pred, eval_label in zip(eval_preds, eval_labels):
-        actual_test_labels = eval_label[:, -1]
-        pred_test_labels = torch.argmax(eval_pred[:, -1], dim=-1)
-        correct_labels = actual_test_labels == pred_test_labels
-        total_count += len(correct_labels)
-        correct_count += correct_labels.sum().tolist()
-    accuracy = round(correct_count / total_count, 2)
-    return {"accuracy": accuracy}
-
-
-def simple_boundless_das_position_config(model_type, intervention_type, layer):
-    config = IntervenableConfig(
-        model_type=model_type,
-        representations=[
-            RepresentationConfig(
-                layer,              # layer
-                intervention_type,  # intervention type
-            ),
-        ],
-        intervention_types=BoundlessRotatedSpaceIntervention,
-    )
-    return config
-
-@hydra.main(version_base=None, config_path="conf", config_name="config")
-def main(cfg: DictConfig):
-    experiment_config = cfg.experiment
-    set_seed(experiment_config.random_seed)
-    device = experiment_config.device
-    DATA_DIR = experiment_config.data_dir
-    BATCH_SIZE = experiment_config.batch_size
-    model_name = experiment_config.model
+def create_llama_model(model_name):
     config = LlamaConfig.from_pretrained(model_name)
     llama = LlamaForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16, 
         config=config,
     )
+    return llama
+
+def reload_dataset(data_dir, batch_size, splits = ['train']):
+    reloaded_dataset = load_from_disk(data_dir).with_format("torch")
+    split_data_loaders = {}
+    for split in splits:
+        dataset = reloaded_dataset[split]
+        dataloader = DataLoader(dataset, batch_size=batch_size)
+        split_data_loaders[split] = dataloader
+    return split_data_loaders
 
 
-    reloaded_dataset = load_from_disk(DATA_DIR).with_format("torch")
-    train_dataset = reloaded_dataset["train"]
-    eval_dataset = reloaded_dataset["eval"]
-    test_dataset = reloaded_dataset["test"]
+@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main(experiment_config: DictConfig):
+    print(experiment_config)
+    set_seed(experiment_config.random_seed)
+    BATCH_SIZE = experiment_config.batch_size
 
-    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE)
-    eval_dataloader = DataLoader(eval_dataset, batch_size=BATCH_SIZE)
-    test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+    MODEL_NAME = experiment_config.model_name
+    llama = create_llama_model(MODEL_NAME)
 
+    DATA_DIR = experiment_config.data_dir
+    data_loaders = reload_dataset(data_dir=DATA_DIR, batch_size=BATCH_SIZE, splits=['train'])
+    train_dataloader = data_loaders['train']
 
-
-    pv_config = simple_boundless_das_position_config(
-        type(llama), experiment_config.pyvene_config.intevention_type, experiment_config.pyvene_config.layer
+    
+    pv_config, config_id = simple_boundless_das_position_config(
+        type(llama), "block_output", experiment_config.layer
     )
     intervenable = IntervenableModel(pv_config, llama)
     vocab_size = intervenable.model_config.vocab_size
@@ -108,6 +68,7 @@ def main(cfg: DictConfig):
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=warm_up_steps, num_training_steps=t_total
     )
+    device = experiment_config.device
     temperature_start = 50.0
     temperature_end = 0.1
     target_total_step = len(train_dataloader) * epochs
@@ -117,18 +78,13 @@ def main(cfg: DictConfig):
         .to(device)
     )
 
-    epochs = 3
-    gradient_accumulation_steps = 4
+    gradient_accumulation_steps = experiment_config.gradient_accumulation_steps
     total_step = 0
-    
-    
 
     intervenable.set_temperature(temperature_schedule[total_step])
     intervenable.disable_model_gradients()
     intervenable.set_device(device)
     
-
-
     print("llama trainable parameters: ", count_parameters(intervenable.model))
     print("intervention trainable parameters: ", intervenable.count_parameters())
     intervenable.model.train() 
@@ -141,7 +97,6 @@ def main(cfg: DictConfig):
             for k, v in inputs.items():
                 if v is not None and isinstance(v, torch.Tensor):
                     inputs[k] = v.to(device)
-            b_s = inputs["input_ids"].shape[0]
             _, counterfactual_outputs = intervenable(
                 {"input_ids": inputs["input_ids"]},
                 [{"input_ids": inputs["source_input_ids"]}],
@@ -166,11 +121,12 @@ def main(cfg: DictConfig):
                     intervenable.set_zero_grad()
                     intervenable.set_temperature(temperature_schedule[total_step])
             total_step += 1
+        
         print("save and push to HF")
         intervenable.save(
             "./models", 
             save_to_hf_hub=True, 
-            hf_repo_name="ducanh2505/pv_alpaca-7b-merged"
+            hf_repo_name=f"ducanh2505/pv_alpaca-7b-merged_{config_id}"
         )
 
 

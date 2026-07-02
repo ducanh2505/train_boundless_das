@@ -1,9 +1,0 @@
-random_seed: 42
-device: "mps"
-data_dir: "data"
-batch_size: 16
-epochs: 3 
-model: "sharpbai/alpaca-7b-merged"
-pyvene_config:
-    intevention_type: "block_output"
-    layer: 15

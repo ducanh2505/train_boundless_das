@@ -1,2 +1,10 @@
-defaults:
-  - experiment: baseline
+random_seed: 42
+
+model_name: "sharpbai/alpaca-7b-merged"
+
+device: "mps"
+data_dir: "data"
+batch_size: 16
+epochs: 3 
+gradient_accumulation_steps: 4
+layer: 16
