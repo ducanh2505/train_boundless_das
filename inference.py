@@ -13,7 +13,7 @@ from pyvene import (
 import pyvene as pv
 from transformers import LlamaForCausalLM, LlamaTokenizer, LlamaConfig
 
-from raw_Boundless_DAS import simple_boundless_das_position_config
+from utils import simple_boundless_das_position_config
 
 
 # You can define your custom compute_metrics function.
