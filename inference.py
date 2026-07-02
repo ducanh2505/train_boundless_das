@@ -13,6 +13,8 @@ from pyvene import (
 import pyvene as pv
 from transformers import LlamaForCausalLM, LlamaTokenizer, LlamaConfig
 
+from raw_Boundless_DAS import simple_boundless_das_position_config
+
 
 # You can define your custom compute_metrics function.
 def compute_metrics(eval_preds, eval_labels):
@@ -28,12 +30,11 @@ def compute_metrics(eval_preds, eval_labels):
     return {"accuracy": accuracy}
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
-def main(cfg: DictConfig):
+def main(experiment_config: DictConfig):
 
-    experiment_config = cfg.experiment
     DATA_DIR = experiment_config.data_dir
     BATCH_SIZE = experiment_config.batch_size
-    model_name = experiment_config.model
+    model_name = experiment_config.model_name
     device = experiment_config.device
     config = LlamaConfig.from_pretrained(model_name)
     llama = LlamaForCausalLM.from_pretrained(
@@ -41,8 +42,12 @@ def main(cfg: DictConfig):
         torch_dtype=torch.bfloat16, 
         config=config,
     )
+
+    _, config_id = simple_boundless_das_position_config(
+        type(llama), "block_output", experiment_config.layer
+    )
     intervenable = pv.IntervenableModel.load(
-        "ducanh2505/pv_alpaca-7b-merged",
+        f"ducanh2505/pv_alpaca-7b-merged_{config_id}",
         model=llama,
         from_huggingface_hub=True
 
